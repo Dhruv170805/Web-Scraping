@@ -1,0 +1,171 @@
+from selenium import webdriver
+from selenium.webdriver import Keys
+from selenium.webdriver.common.by import By
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
+from selenium.common.exceptions import TimeoutException
+import pandas as pd
+import time
+
+
+def save_table_separate_file_per_hs(driver, hs_code, base_path):
+    """Save each HS code's table to a separate Excel file."""
+    try:
+        table = driver.find_element(By.TAG_NAME, "table")
+        rows = table.find_elements(By.TAG_NAME, "tr")
+
+        if not rows:
+            print(f"No table found for HS code: {hs_code}")
+            return False
+
+        all_data = []
+        for tr in rows:
+            cells = tr.find_elements(By.TAG_NAME, "th") + tr.find_elements(By.TAG_NAME, "td")
+            row_data = [cell.text.strip() for cell in cells]
+            all_data.append(row_data)
+
+        if len(all_data) < 2:
+            print(f"Not enough table data for {hs_code}")
+            return False
+
+        df = pd.DataFrame(all_data[1:], columns=all_data[0])
+        filename = f"{base_path}_HS_{hs_code}.xlsx"
+        df.to_excel(filename, index=False)
+        print(f"✅ Saved HS code {hs_code} to file: {filename}")
+        return True
+
+    except Exception as e:
+        print(f"❌ Error saving file for {hs_code}: {e}")
+        return False
+
+
+def scrape_ezt_data():
+    options = webdriver.ChromeOptions()
+    options.add_argument("--start-maximized")
+    options.add_argument("--disable-blink-features=AutomationControlled")
+    driver = webdriver.Chrome(options=options)
+
+    url = "https://auskunft.ezt-online.de/ezto/UebersichtSucheAnzeige.do?nodeId=93797_55848&nodeExpand=true#93797_55848"
+    hs_codes = ["0101000000", "0101210000", "0101310000"]
+    base_excel_path = r"C:\Users\dhruv\Desktop\EZT_Import_Data"
+
+    try:
+        driver.get(url)
+        print("Opened EZT Online website...")
+        time.sleep(3)
+
+        # Click "zur Einfuhr" once
+        try:
+            btn = WebDriverWait(driver, 10).until(
+                EC.element_to_be_clickable((By.CSS_SELECTOR, "input[value*='Einfuhr']"))
+            )
+            btn.click()
+            print("✅ Clicked 'zur Einfuhr' button once.")
+            time.sleep(4)
+        except TimeoutException:
+            print("❌ Could not find 'zur Einfuhr' button.")
+            return
+
+        for i, code in enumerate(hs_codes):
+            print(f"\n--- Processing HS code: {code} ---")
+
+            # Between codes, click "Neue Suche" or "Zurück"
+            if i > 0:
+                print("↩ Navigating back using page button...")
+                try:
+                    driver.switch_to.default_content()
+                    back_btns = driver.find_elements(
+                        By.XPATH, "//a[contains(text(),'Neue Suche') or contains(text(),'Zurück')]"
+                    )
+                    if back_btns:
+                        driver.execute_script("arguments[0].click();", back_btns[0])
+                        time.sleep(3)
+                    else:
+                        driver.back()
+                        time.sleep(3)
+                except Exception as e:
+                    print(f"⚠ Could not navigate back: {e}")
+
+            # Locate input box and search
+            driver.switch_to.default_content()
+            try:
+                input_box = WebDriverWait(driver, 10).until(
+                    EC.presence_of_element_located((By.NAME, "warennummer"))
+                )
+                input_box.clear()
+                time.sleep(0.5)
+                input_box.send_keys(code)
+                input_box.send_keys(Keys.ENTER)
+                print(f"✅ Entered HS Code: {code}")
+                time.sleep(5)
+            except TimeoutException:
+                print(f"❌ Input box not found for {code}")
+                continue
+
+            # For first HS code only — click search button (if exists)
+            if i == 0:
+                try:
+                    search_btn = WebDriverWait(driver, 10).until(
+                        EC.element_to_be_clickable((By.XPATH, "//*[@id='warenbeschr']/div[5]/div[3]/a"))
+                    )
+                    driver.execute_script("arguments[0].click();", search_btn)
+                    print("🔍 Clicked Search button for first HS code.")
+                    time.sleep(5)
+                except TimeoutException:
+                    print("⚠ Could not find search button, continuing with Enter key only.")
+
+            # Try switching to results frame
+            driver.switch_to.default_content()
+            result_frame_found = False
+            for selector in [
+                "frame[name='inhalt']", "iframe[name='inhalt']",
+                "frame[src*='inhalt']", "iframe[src*='inhalt']"
+            ]:
+                try:
+                    result_frame = WebDriverWait(driver, 3).until(
+                        EC.presence_of_element_located((By.CSS_SELECTOR, selector))
+                    )
+                    driver.switch_to.frame(result_frame)
+                    result_frame_found = True
+                    print(f"✅ Switched to results frame: {selector}")
+                    break
+                except TimeoutException:
+                    continue
+
+            if not result_frame_found:
+                print("⚠ No results frame found. Working in main document.")
+                driver.switch_to.default_content()
+
+            # Expand any nodes (+ icons)
+            total_clicks = 0
+            for round_num in range(5):
+                plus_icons = driver.find_elements(By.XPATH,
+                    "//img[contains(@src,'plus') or contains(@src,'collapse') or @alt='+']"
+                )
+                if not plus_icons:
+                    break
+
+                print(f"Round {round_num + 1}: Found {len(plus_icons)} expandable nodes")
+                for icon in plus_icons:
+                    try:
+                        driver.execute_script("arguments[0].scrollIntoView();", icon)
+                        driver.execute_script("arguments[0].click();", icon)
+                        total_clicks += 1
+                        time.sleep(0.2)
+                    except:
+                        continue
+                time.sleep(1)
+
+            print(f"✅ Expansion completed: {total_clicks} clicks")
+
+            # Save data
+            save_table_separate_file_per_hs(driver, code, base_excel_path)
+            time.sleep(2)
+
+    finally:
+        driver.quit()
+        print("Browser closed.")
+
+
+if __name__ == "__main__":
+    scrape_ezt_data()
